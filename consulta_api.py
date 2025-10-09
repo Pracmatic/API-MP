@@ -200,6 +200,8 @@ def listar_oc_por_rango(session, ticket, organismos, desde_dt, hasta_dt, args, l
             logger.error("Respuesta no es JSON para params %s", params)
             continue
         listado = payload.get("Listado") or []
+        if isinstance(listado, dict):
+            listado = [listado]
         for registro in listado:
             codigo = registro.get("Codigo") or registro.get("codigo")
             if codigo and codigo not in vistos:
