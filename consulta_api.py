@@ -1,11 +1,14 @@
 import argparse
 import csv
 import logging
+import os
 import random
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from threading import Lock, local
 
 import pandas as pd
 import requests
@@ -85,6 +88,28 @@ COLUMNAS = [
 ]
 
 
+_THREAD_LOCAL = local()
+_SESSIONS: list[requests.Session] = []
+_SESSIONS_LOCK = Lock()
+
+
+def _get_thread_session() -> requests.Session:
+    session = getattr(_THREAD_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        _THREAD_LOCAL.session = session
+        with _SESSIONS_LOCK:
+            _SESSIONS.append(session)
+    return session
+
+
+def _close_thread_sessions():
+    with _SESSIONS_LOCK:
+        while _SESSIONS:
+            session = _SESSIONS.pop()
+            session.close()
+
+
 def parse_fecha_arg(valor: str) -> date:
     try:
         return datetime.strptime(valor, "%d-%m-%Y").date()
@@ -97,6 +122,16 @@ def parse_ticket(valor: str) -> str:
     if not token:
         raise argparse.ArgumentTypeError("El ticket/token no puede estar vacío")
     return token
+
+
+def parse_workers(valor: str) -> int:
+    try:
+        workers = int(valor)
+    except ValueError as exc:  # pragma: no cover
+        raise argparse.ArgumentTypeError("La cantidad de hilos debe ser un entero") from exc
+    if workers < 1:
+        raise argparse.ArgumentTypeError("La cantidad de hilos debe ser al menos 1")
+    return workers
 
 
 def rango_fechas(desde: date, hasta: date):
@@ -177,37 +212,91 @@ def request_with_retries(session: requests.Session, params: dict, read_timeout: 
     return None
 
 
-def listar_oc_por_rango(session, ticket, organismos, desde_dt, hasta_dt, args, logger):
-    codigos = []
+def listar_oc_por_rango(ticket, organismos, desde_dt, hasta_dt, args, logger):
+    codigos: list[str] = []
     vistos = set()
     fechas = list(rango_fechas(desde_dt, hasta_dt))
     combinaciones = [(dia, org) for dia in fechas for org in organismos]
     total = len(combinaciones)
 
-    if tqdm:
-        iterable = tqdm(combinaciones, total=total, desc="Listando", unit="consulta")
-    else:
-        iterable = combinaciones
+    if args.workers <= 1:
+        session = requests.Session()
+        try:
+            if tqdm:
+                iterable = tqdm(combinaciones, total=total, desc="Listando", unit="consulta")
+            else:
+                iterable = combinaciones
+            for idx, (dia, organismo) in enumerate(iterable, start=1):
+                params = {"fecha": to_api_date(dia), "CodigoOrganismo": organismo, "ticket": ticket}
+                response = request_with_retries(session, params, args.timeout, args.retries, logger)
+                if response is None:
+                    continue
+                try:
+                    payload = response.json()
+                except ValueError:  # pragma: no cover
+                    logger.error("Respuesta no es JSON para params %s", params)
+                    continue
+                listado = payload.get("Listado") or []
+                for registro in listado:
+                    codigo = registro.get("Codigo") or registro.get("codigo")
+                    if codigo and codigo not in vistos:
+                        vistos.add(codigo)
+                        codigos.append(codigo)
+                if not tqdm and idx % args.progress_every == 0:
+                    logger.info("Procesados %s de %s combinaciones", idx, total)
+                time.sleep(args.sleep)
+            return codigos
+        finally:
+            session.close()
 
-    for idx, (dia, organismo) in enumerate(iterable, start=1):
+    lock = Lock()
+
+    def procesar(dia: date, organismo: str) -> list[str]:
+        session = _get_thread_session()
         params = {"fecha": to_api_date(dia), "CodigoOrganismo": organismo, "ticket": ticket}
         response = request_with_retries(session, params, args.timeout, args.retries, logger)
-        if response is None:
-            continue
-        try:
-            payload = response.json()
-        except ValueError:  # pragma: no cover
-            logger.error("Respuesta no es JSON para params %s", params)
-            continue
-        listado = payload.get("Listado") or []
-        for registro in listado:
-            codigo = registro.get("Codigo") or registro.get("codigo")
-            if codigo and codigo not in vistos:
-                vistos.add(codigo)
-                codigos.append(codigo)
-        if not tqdm and idx % args.progress_every == 0:
-            logger.info("Procesados %s de %s combinaciones", idx, total)
+        resultados: list[str] = []
+        if response is not None:
+            try:
+                payload = response.json()
+            except ValueError:  # pragma: no cover
+                logger.error("Respuesta no es JSON para params %s", params)
+            else:
+                listado = payload.get("Listado") or []
+                for registro in listado:
+                    codigo = registro.get("Codigo") or registro.get("codigo")
+                    if codigo:
+                        resultados.append(codigo)
         time.sleep(args.sleep)
+        return resultados
+
+    progress = tqdm(total=total, desc="Listando", unit="consulta") if tqdm else None
+    try:
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            future_to_combo = {
+                executor.submit(procesar, dia, organismo): (dia, organismo) for dia, organismo in combinaciones
+            }
+            for idx, future in enumerate(as_completed(future_to_combo), start=1):
+                dia, organismo = future_to_combo[future]
+                try:
+                    nuevos = future.result()
+                except Exception as exc:  # pragma: no cover
+                    logger.exception("Error listando combinación (%s, %s): %s", dia, organismo, exc)
+                    nuevos = []
+                if nuevos:
+                    with lock:
+                        for codigo in nuevos:
+                            if codigo not in vistos:
+                                vistos.add(codigo)
+                                codigos.append(codigo)
+                if progress:
+                    progress.update(1)
+                elif idx % args.progress_every == 0:
+                    logger.info("Procesados %s de %s combinaciones", idx, total)
+    finally:
+        if progress:
+            progress.close()
+        _close_thread_sessions()
     return codigos
 
 
@@ -250,7 +339,7 @@ def construir_fila_oc(oc: dict) -> dict:
     return fila
 
 
-def descargar_detalle_y_escribir(session, ticket, codigos, args, desde_dt, hasta_dt, logger):
+def descargar_detalle_y_escribir(ticket, codigos, args, desde_dt, hasta_dt, logger):
     csv_path = Path("consulta_api.csv")
     escribir_header = True
     filas_batch = []
@@ -272,37 +361,92 @@ def descargar_detalle_y_escribir(session, ticket, codigos, args, desde_dt, hasta
         escritos += len(filas_batch)
         filas_batch = []
 
-    iterable = codigos
-    if tqdm:
-        iterable = tqdm(codigos, desc="Descargando", unit="oc")
-
-    for idx, codigo in enumerate(iterable, start=1):
-        params = {"codigo": codigo, "ticket": ticket}
-        response = request_with_retries(session, params, args.timeout, args.retries, logger)
-        if response is None:
-            continue
+    if args.workers <= 1:
+        session = requests.Session()
         try:
-            payload = response.json()
-        except ValueError:  # pragma: no cover
-            logger.error("Detalle no es JSON para código %s", codigo)
-            continue
-        listado = payload.get("Listado") or []
-        if isinstance(listado, dict):
-            listado = [listado]
-        if not listado:
-            continue
-        oc = listado[0]
-        fecha_creacion = parse_fecha_json(safe_get(oc, "Fechas", "FechaCreacion"))
-        if fecha_creacion is None or fecha_creacion < desde_dt or fecha_creacion > hasta_dt:
-            continue
-        fila = construir_fila_oc(oc)
-        filas_batch.append(fila)
-        if len(filas_batch) >= args.batch_size:
-            flush()
-        if not tqdm and idx % args.progress_every == 0:
-            logger.info("Procesados %s de %s códigos", idx, len(codigos))
-        pausa = args.sleep_detail + random.uniform(0, max(args.sleep_detail * 0.1, 0.01))
-        time.sleep(pausa)
+            iterable = tqdm(codigos, desc="Descargando", unit="oc") if tqdm else codigos
+            for idx, codigo in enumerate(iterable, start=1):
+                params = {"codigo": codigo, "ticket": ticket}
+                response = request_with_retries(session, params, args.timeout, args.retries, logger)
+                if response is None:
+                    continue
+                try:
+                    payload = response.json()
+                except ValueError:  # pragma: no cover
+                    logger.error("Detalle no es JSON para código %s", codigo)
+                    continue
+                listado = payload.get("Listado") or []
+                if isinstance(listado, dict):
+                    listado = [listado]
+                if not listado:
+                    continue
+                oc = listado[0]
+                fecha_creacion = parse_fecha_json(safe_get(oc, "Fechas", "FechaCreacion"))
+                if fecha_creacion is None or fecha_creacion < desde_dt or fecha_creacion > hasta_dt:
+                    continue
+                fila = construir_fila_oc(oc)
+                filas_batch.append(fila)
+                if len(filas_batch) >= args.batch_size:
+                    flush()
+                if not tqdm and idx % args.progress_every == 0:
+                    logger.info("Procesados %s de %s códigos", idx, len(codigos))
+                pausa = args.sleep_detail + random.uniform(0, max(args.sleep_detail * 0.1, 0.01))
+                time.sleep(pausa)
+        finally:
+            session.close()
+    else:
+        total = len(codigos)
+        progress = tqdm(total=total, desc="Descargando", unit="oc") if tqdm else None
+
+        def procesar(codigo: str):
+            session_local = _get_thread_session()
+            params = {"codigo": codigo, "ticket": ticket}
+            pausa = args.sleep_detail + random.uniform(0, max(args.sleep_detail * 0.1, 0.01))
+            try:
+                response = request_with_retries(session_local, params, args.timeout, args.retries, logger)
+                if response is None:
+                    return None
+                try:
+                    payload = response.json()
+                except ValueError:  # pragma: no cover
+                    logger.error("Detalle no es JSON para código %s", codigo)
+                    return None
+                listado = payload.get("Listado") or []
+                if isinstance(listado, dict):
+                    listado = [listado]
+                if not listado:
+                    return None
+                oc = listado[0]
+                fecha_creacion = parse_fecha_json(safe_get(oc, "Fechas", "FechaCreacion"))
+                if fecha_creacion is None or fecha_creacion < desde_dt or fecha_creacion > hasta_dt:
+                    return None
+                return construir_fila_oc(oc)
+            finally:
+                time.sleep(pausa)
+
+        try:
+            with ThreadPoolExecutor(max_workers=args.workers) as executor:
+                future_to_codigo = {executor.submit(procesar, codigo): codigo for codigo in codigos}
+                for idx, future in enumerate(as_completed(future_to_codigo), start=1):
+                    codigo = future_to_codigo[future]
+                    try:
+                        fila = future.result()
+                    except Exception as exc:  # pragma: no cover
+                        logger.exception("Error descargando código %s: %s", codigo, exc)
+                        fila = None
+                    if fila:
+                        filas_batch.append(fila)
+                        if len(filas_batch) >= args.batch_size:
+                            flush()
+                    if progress:
+                        progress.update(1)
+                    elif idx % args.progress_every == 0:
+                        logger.info("Procesados %s de %s códigos", idx, total)
+        finally:
+            if progress:
+                progress.close()
+            _close_thread_sessions()
+
     flush()
     logger.info("Total de órdenes escritas: %s", escritos)
     return csv_path
@@ -339,6 +483,12 @@ def parse_args():
     parser.add_argument("--progress-every", dest="progress_every", type=int, default=100)
     parser.add_argument("--batch-size", dest="batch_size", type=int, default=1000)
     parser.add_argument("--retries", type=int, default=5)
+    parser.add_argument(
+        "--workers",
+        type=parse_workers,
+        default=max(1, min(8, (os.cpu_count() or 4))),
+        help="Cantidad de hilos para peticiones concurrentes (1 para modo secuencial)",
+    )
     return parser.parse_args()
 
 
@@ -359,16 +509,15 @@ def main():
     logger.info("Inicio de consulta desde %s hasta %s", args.desde, args.hasta)
 
     try:
-        with requests.Session() as session:
-            codigos = listar_oc_por_rango(session, args.ticket, ORGANISMOS, args.desde, args.hasta, args, logger)
-            logger.info("Total de códigos únicos obtenidos: %s", len(codigos))
+        codigos = listar_oc_por_rango(args.ticket, ORGANISMOS, args.desde, args.hasta, args, logger)
+        logger.info("Total de códigos únicos obtenidos: %s", len(codigos))
 
-            csv_path = descargar_detalle_y_escribir(session, args.ticket, codigos, args, args.desde, args.hasta, logger)
-            if csv_path.exists():
-                generar_excel_desde_csv(csv_path, Path("consulta_api.xlsx"), COLUMNAS)
-                logger.info("Archivos generados: %s y consulta_api.xlsx", csv_path.name)
-            else:
-                logger.warning("No se generó archivo CSV")
+        csv_path = descargar_detalle_y_escribir(args.ticket, codigos, args, args.desde, args.hasta, logger)
+        if csv_path.exists():
+            generar_excel_desde_csv(csv_path, Path("consulta_api.xlsx"), COLUMNAS)
+            logger.info("Archivos generados: %s y consulta_api.xlsx", csv_path.name)
+        else:
+            logger.warning("No se generó archivo CSV")
     except Exception as exc:  # pragma: no cover
         logger.exception("Error inesperado: %s", exc)
         duplicar_log()
