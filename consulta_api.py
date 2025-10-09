@@ -92,6 +92,13 @@ def parse_fecha_arg(valor: str) -> date:
         raise argparse.ArgumentTypeError(f"Formato de fecha inválido: {valor}") from exc
 
 
+def parse_ticket(valor: str) -> str:
+    token = valor.strip()
+    if not token:
+        raise argparse.ArgumentTypeError("El ticket/token no puede estar vacío")
+    return token
+
+
 def rango_fechas(desde: date, hasta: date):
     actual = desde
     delta = timedelta(days=1)
@@ -322,6 +329,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Consulta la API de Mercado Público")
     parser.add_argument("--desde", required=True, type=parse_fecha_arg)
     parser.add_argument("--hasta", required=True, type=parse_fecha_arg)
+    parser.add_argument("--ticket", required=True, type=parse_ticket)
     parser.add_argument("--ticket", required=True)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--sleep", type=float, default=0.20)
