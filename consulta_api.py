@@ -326,6 +326,14 @@ def duplicar_log():
 
 
 def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Consulta la API de Mercado Público",
+        allow_abbrev=False,
+        conflict_handler="resolve",
+    )
+    parser.add_argument("--desde", required=True, type=parse_fecha_arg)
+    parser.add_argument("--hasta", required=True, type=parse_fecha_arg)
+    parser.add_argument("--ticket", required=True, type=parse_ticket)
     parser = argparse.ArgumentParser(description="Consulta la API de Mercado Público")
     parser.add_argument("--desde", required=True, type=parse_fecha_arg)
     parser.add_argument("--hasta", required=True, type=parse_fecha_arg)
