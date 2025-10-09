@@ -46,6 +46,7 @@ python consulta_api.py --desde 01-09-2025 --hasta 02-09-2025 --ticket TU_TOKEN
 - `--progress-every`: frecuencia de logs cuando no está disponible `tqdm` (por defecto `100`).
 - `--batch-size`: tamaño de lote para escritura en CSV (por defecto `1000`).
 - `--retries`: cantidad de reintentos por petición (por defecto `5`).
+- `--workers`: cantidad de hilos para paralelizar las consultas (por defecto `min(8, cpu_count)`; usa `1` para modo secuencial).
 
 ## Salida
 El script generará en el directorio actual:
