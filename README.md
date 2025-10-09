@@ -18,6 +18,16 @@ pip install requests python-dateutil pandas openpyxl tqdm
 ```
 
 ## Uso
+Dentro del script debes configurar los ID de los servicios públicos a consultar en la línea 21 del código:
+```bash
+ORGANISMOS = [
+(Código de organismos entrecomillas y separado por comas en caso de que sea más de uno; Ejemplo:
+ "1675210", "1820906" 
+ buscar en: https://datos-abiertos.chilecompra.cl/descargas/complementos -> "Registro histórico de organismos compradores")
+]
+```
+Nota: Por defecto el Script contiene el código de 26 organismos locales de educación pública (líneas 22 a 60), eliminar y cambiar por el requerido.
+
 Ejecuta el script `consulta_api.py` desde la terminal indicando el rango de fechas y tu ticket/token de Mercado Público:
 
 ```bash
