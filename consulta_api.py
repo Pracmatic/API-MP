@@ -81,7 +81,7 @@ COLUMNAS = [
     "Unidad Compradora",
     "Nombre Organismo",
     "Contacto Comprador",
-    "Fuente Financiemiento",
+    "Fuente Financiamiento",
     "Codigo categoria",
     "Categoría",
     "Codigo producto",
@@ -168,6 +168,56 @@ def safe_get(data, *keys):
         else:
             return ""
     return actual if actual is not None else ""
+
+
+def normalizar_texto(valor) -> str:
+    if isinstance(valor, (list, tuple, set)):
+        for elemento in valor:
+            resultado = normalizar_texto(elemento)
+            if resultado:
+                return resultado
+        return ""
+    if isinstance(valor, dict):
+        for campo in ("Nombre", "Descripcion", "DescripcionLarga", "DescripcionCorta", "Glosa", "Valor", "Codigo"):
+            resultado = valor.get(campo)
+            if resultado:
+                return str(resultado)
+        return ""
+    if valor is None:
+        return ""
+    return str(valor)
+
+
+def normalizar_moneda(valor) -> str:
+    if isinstance(valor, list):
+        for elemento in valor:
+            resultado = normalizar_moneda(elemento)
+            if resultado:
+                return resultado
+        return ""
+    if isinstance(valor, dict):
+        for campo in ("Nombre", "Descripcion", "DescripcionMoneda", "Codigo", "CodigoMoneda", "Moneda"):
+            resultado = valor.get(campo)
+            if resultado:
+                return resultado
+        return ""
+    return valor or ""
+
+
+def obtener_moneda(oc: dict, primer_item: dict | None) -> str:
+    moneda = normalizar_moneda(oc.get("Moneda"))
+    if moneda:
+        return moneda
+    if primer_item:
+        return normalizar_moneda(primer_item.get("Moneda"))
+    return ""
+
+
+def obtener_fuente_financiamiento(oc: dict) -> str:
+    fuente = normalizar_texto(oc.get("FuenteFinanciamiento"))
+    if fuente:
+        return fuente
+    return normalizar_texto(safe_get(oc, "Comprador", "FuenteFinanciamiento"))
 
 
 def configurar_logger() -> logging.Logger:
@@ -318,7 +368,7 @@ def construir_fila_oc(oc: dict) -> dict:
         "Descripción": oc.get("Descripcion", ""),
         "Código Licitación": oc.get("CodigoLicitacion", ""),
         "Tipo": oc.get("Tipo", ""),
-        "Moneda": oc.get("Moneda", ""),
+        "Moneda": obtener_moneda(oc, primer_item),
         "Fecha Creación": formatear_fecha_salida(fechas.get("FechaCreacion")),
         "Fecha Envío": formatear_fecha_salida(fechas.get("FechaEnvio")),
         "Fecha Aceptación": formatear_fecha_salida(fechas.get("FechaAceptacion")),
@@ -329,7 +379,7 @@ def construir_fila_oc(oc: dict) -> dict:
         "Unidad Compradora": safe_get(oc, "Comprador", "NombreUnidad"),
         "Nombre Organismo": safe_get(oc, "Comprador", "NombreOrganismo"),
         "Contacto Comprador": safe_get(oc, "Comprador", "Nombre"),
-        "Fuente Financiemiento": oc.get("FuenteFinanciamiento", ""),
+        "Fuente Financiamiento": obtener_fuente_financiamiento(oc),
         "Codigo categoria": primer_item.get("CodigoCategoria", "") if primer_item else "",
         "Categoría": primer_item.get("Categoria", "") if primer_item else "",
         "Codigo producto": primer_item.get("CodigoProducto", "") if primer_item else "",
