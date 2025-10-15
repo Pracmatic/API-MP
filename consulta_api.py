@@ -214,10 +214,18 @@ def obtener_moneda(oc: dict, primer_item: dict | None) -> str:
 
 
 def obtener_fuente_financiamiento(oc: dict) -> str:
-    fuente = normalizar_texto(oc.get("FuenteFinanciamiento"))
-    if fuente:
-        return fuente
+    for campo in ("FuenteFinanciamiento", "Financiamiento"):
+        fuente = normalizar_texto(oc.get(campo))
+        if fuente:
+            return fuente
     return normalizar_texto(safe_get(oc, "Comprador", "FuenteFinanciamiento"))
+
+
+def obtener_rut_proveedor(oc: dict) -> str:
+    rut = normalizar_texto(safe_get(oc, "Proveedor", "RutProveedor"))
+    if rut:
+        return rut
+    return normalizar_texto(safe_get(oc, "Proveedor", "RutSucursal"))
 
 
 def configurar_logger() -> logging.Logger:
@@ -375,7 +383,7 @@ def construir_fila_oc(oc: dict) -> dict:
         "Total": oc.get("Total", ""),
         "Total Neto": oc.get("TotalNeto", ""),
         "Proveedor": safe_get(oc, "Proveedor", "Nombre"),
-        "Rut Proveedor": safe_get(oc, "Proveedor", "RutProveedor"),
+        "Rut Proveedor": obtener_rut_proveedor(oc),
         "Unidad Compradora": safe_get(oc, "Comprador", "NombreUnidad"),
         "Nombre Organismo": safe_get(oc, "Comprador", "NombreOrganismo"),
         "Contacto Comprador": safe_get(oc, "Comprador", "Nombre"),
