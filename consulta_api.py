@@ -246,28 +246,49 @@ def configurar_logger() -> logging.Logger:
     return logger
 
 
-def request_with_retries(session: requests.Session, params: dict, read_timeout: float, retries: int, logger: logging.Logger):
+def request_with_retries(
+    session: requests.Session,
+    params: dict,
+    read_timeout: float,
+    retries: int,
+    logger: logging.Logger,
+):
     attempt = 0
     wait = 1.0
-    while attempt < retries:
+    max_wait = 60.0
+    ilimitado = retries <= 0
+    while True:
+        attempt += 1
         try:
             response = session.get(BASE_URL, params=params, timeout=(10, read_timeout))
             if response.status_code == 200:
                 return response
             if response.status_code in {429} or 500 <= response.status_code < 600:
                 logger.warning(
-                    "Respuesta %s para params %s. Reintentando en %.1fs", response.status_code, params, wait
+                    "Respuesta %s para params %s (intento %s). Reintentando en %.1fs",
+                    response.status_code,
+                    params,
+                    attempt,
+                    wait,
                 )
             else:
                 logger.error("Error %s para params %s", response.status_code, params)
                 return None
         except requests.RequestException as exc:
-            logger.warning("Excepción en request (%s). Reintentando en %.1fs", exc, wait)
-        attempt += 1
+            logger.warning(
+                "Excepción en request (%s) para params %s (intento %s). Reintentando en %.1fs",
+                exc,
+                params,
+                attempt,
+                wait,
+            )
+
+        if not ilimitado and attempt >= retries:
+            logger.error("Agotados los reintentos para params %s", params)
+            return None
+
         time.sleep(wait)
-        wait *= 2
-    logger.error("Agotados los reintentos para params %s", params)
-    return None
+        wait = min(wait * 2, max_wait)
 
 
 def listar_oc_por_rango(ticket, organismos, desde_dt, hasta_dt, args, logger):
@@ -540,7 +561,12 @@ def parse_args():
     parser.add_argument("--sleep-detail", dest="sleep_detail", type=float, default=0.22)
     parser.add_argument("--progress-every", dest="progress_every", type=int, default=100)
     parser.add_argument("--batch-size", dest="batch_size", type=int, default=1000)
-    parser.add_argument("--retries", type=int, default=5)
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=0,
+        help="Cantidad de reintentos por petición (0 o negativo para ilimitados)",
+    )
     parser.add_argument(
         "--workers",
         type=parse_workers,

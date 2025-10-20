@@ -45,7 +45,7 @@ python consulta_api.py --desde 01-09-2025 --hasta 02-09-2025 --ticket TU_TOKEN
 - `--sleep-detail`: pausa entre consultas de detalle en segundos (por defecto `0.22`).
 - `--progress-every`: frecuencia de logs cuando no está disponible `tqdm` (por defecto `100`).
 - `--batch-size`: tamaño de lote para escritura en CSV (por defecto `1000`).
-- `--retries`: cantidad de reintentos por petición (por defecto `5`).
+- `--retries`: cantidad de reintentos por petición (usa `0` para ilimitados; por defecto `0`).
 - `--workers`: cantidad de hilos para paralelizar las consultas (por defecto `min(8, cpu_count)`; usa `1` para modo secuencial).
 
 ## Salida
